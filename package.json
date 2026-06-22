@@ -1,0 +1,28 @@
+{
+  "name": "oqva-marketing-mcp",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "author": "OQVA",
+  "type": "module",
+  "description": "Zero-dependency MCP server giving Claude direct read + management access to your marketing data: Google Search Console, GA4, Google Business Profile, Google Tag Manager, and Meta — Node built-ins only, no third-party middleman.",
+  "bin": {
+    "oqva-marketing-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "setup": "tsc && node dist/index.js setup",
+    "doctor": "tsc && node dist/index.js doctor",
+    "auth": "tsc && node dist/index.js auth",
+    "build:binaries": "./build.sh",
+    "dev": "tsc --watch"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

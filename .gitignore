@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+# never commit credentials
+*sa-key*.json
+*service-account*.json
+secrets/
