@@ -81,6 +81,15 @@ let META_TOKEN = process.env.META_ACCESS_TOKEN ?? "";
 let META_AD_ACCOUNT = process.env.META_AD_ACCOUNT_ID ?? "";
 let META_PAGE_ID = process.env.META_PAGE_ID ?? "";
 let META_API_VER = process.env.META_API_VERSION ?? "v22.0";
+// TikTok Business / Marketing API. Auth = a long-lived Access-Token (sent in the
+// `Access-Token` header, NOT a bearer or query param). APP_ID/SECRET are only needed
+// to *discover* advertiser ids (oauth2/advertiser/get); day-to-day tools just need the
+// token + an advertiser id. See SETUP.md (TikTok section).
+let TIKTOK_TOKEN = process.env.TIKTOK_ACCESS_TOKEN ?? "";
+let TIKTOK_ADVERTISER = process.env.TIKTOK_ADVERTISER_ID ?? "";
+let TIKTOK_APP_ID = process.env.TIKTOK_APP_ID ?? "";
+let TIKTOK_APP_SECRET = process.env.TIKTOK_APP_SECRET ?? "";
+let TIKTOK_API_VER = process.env.TIKTOK_API_VERSION ?? "v1.3";
 /** Re-read every config value from process.env — called after `setup` writes new ones. */
 function reloadConfig(): void {
   GSC_SITE_URL = process.env.GSC_SITE_URL ?? "";
@@ -93,6 +102,11 @@ function reloadConfig(): void {
   META_AD_ACCOUNT = process.env.META_AD_ACCOUNT_ID ?? "";
   META_PAGE_ID = process.env.META_PAGE_ID ?? "";
   META_API_VER = process.env.META_API_VERSION ?? "v22.0";
+  TIKTOK_TOKEN = process.env.TIKTOK_ACCESS_TOKEN ?? "";
+  TIKTOK_ADVERTISER = process.env.TIKTOK_ADVERTISER_ID ?? "";
+  TIKTOK_APP_ID = process.env.TIKTOK_APP_ID ?? "";
+  TIKTOK_APP_SECRET = process.env.TIKTOK_APP_SECRET ?? "";
+  TIKTOK_API_VER = process.env.TIKTOK_API_VERSION ?? "v1.3";
 }
 
 const GOOGLE_SCOPES = [
@@ -178,6 +192,53 @@ async function mfetch(path: string, params: Record<string, string | number | und
   return body;
 }
 
+// TikTok Business API differs from Meta in three ways that matter here:
+//   1. auth is the `Access-Token` HEADER (not a bearer, not a query param),
+//   2. GET params that are arrays/objects (fields, filtering, dimensions…) must be
+//      JSON-stringified in the query string,
+//   3. every response is HTTP 200 with an envelope `{code,message,request_id,data}` —
+//      a non-zero `code` is the real error, so we surface that even on a 200.
+async function tfetch(path: string, params: Record<string, any> = {}, method: string = "GET"): Promise<unknown> {
+  if (!TIKTOK_TOKEN) throw new Error("TikTok not configured — set TIKTOK_ACCESS_TOKEN (+ TIKTOK_ADVERTISER_ID). See SETUP.md.");
+  const clean = path.replace(/^\//, "").replace(/\/?$/, "/"); // endpoints are trailing-slash, e.g. campaign/get/
+  const u = new URL(`https://business-api.tiktok.com/open_api/${TIKTOK_API_VER}/${clean}`);
+  const headers: Record<string, string> = { "Access-Token": TIKTOK_TOKEN };
+  const init: { method: string; headers: Record<string, string>; body?: string } = { method, headers };
+  if (method === "GET") {
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === "") continue;
+      u.searchParams.set(k, typeof v === "string" || typeof v === "number" ? String(v) : JSON.stringify(v));
+    }
+  } else {
+    headers["Content-Type"] = "application/json";
+    const bodyObj: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "") bodyObj[k] = v;
+    init.body = JSON.stringify(bodyObj);
+  }
+  const r = await fetch(u, init);
+  const body = (await r.json().catch(() => ({}))) as { code?: number; message?: string; request_id?: string };
+  if (!r.ok) throw new Error(`TikTok API HTTP ${r.status} (${method} ${clean}): ${JSON.stringify(body)}`);
+  if (body && typeof body === "object" && body.code !== undefined && body.code !== 0) {
+    throw new Error(`TikTok API error ${body.code}: ${body.message ?? "unknown"} (request_id ${body.request_id ?? "?"})`);
+  }
+  return body;
+}
+
+/** List advertiser accounts a token can access — the ONE call that uses query-param auth
+ * (access_token+app_id+secret) instead of the header. Needs TIKTOK_APP_ID + _SECRET. */
+async function tiktokListAdvertisers(): Promise<unknown> {
+  if (!TIKTOK_TOKEN) throw new Error("TikTok not configured — set TIKTOK_ACCESS_TOKEN.");
+  if (!TIKTOK_APP_ID || !TIKTOK_APP_SECRET) throw new Error("Set TIKTOK_APP_ID + TIKTOK_APP_SECRET to discover advertiser ids (oauth2/advertiser/get).");
+  const u = new URL(`https://business-api.tiktok.com/open_api/${TIKTOK_API_VER}/oauth2/advertiser/get/`);
+  u.searchParams.set("access_token", TIKTOK_TOKEN);
+  u.searchParams.set("app_id", TIKTOK_APP_ID);
+  u.searchParams.set("secret", TIKTOK_APP_SECRET);
+  const r = await fetch(u);
+  const body = (await r.json().catch(() => ({}))) as { code?: number; message?: string };
+  if (body && body.code !== undefined && body.code !== 0) throw new Error(`TikTok API error ${body.code}: ${body.message ?? "unknown"}`);
+  return body;
+}
+
 // ─────────────────────────── tool registry + result helpers ───────────────────────────
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 type Args = Record<string, any>;
@@ -213,6 +274,7 @@ const arr = (items: unknown, description?: string) => ({ type: "array", items, .
 tool("config_status", "Report which marketing data sources are configured (no secrets revealed). Call first if a tool says 'not configured'.", obj({}), async () => ({
   google: { credentialsConfigured: googleConfigured(), gscSiteUrl: GSC_SITE_URL || null, ga4PropertyId: GA4_PROPERTY_ID || null, gbpAccountId: GBP_ACCOUNT_ID || null },
   meta: { tokenSet: !!META_TOKEN, adAccountId: META_AD_ACCOUNT || null, pageId: META_PAGE_ID || null, apiVersion: META_API_VER },
+  tiktok: { tokenSet: !!TIKTOK_TOKEN, advertiserId: TIKTOK_ADVERTISER || null, appConfigured: !!(TIKTOK_APP_ID && TIKTOK_APP_SECRET), apiVersion: TIKTOK_API_VER },
 }));
 
 // ───────── Google Search Console ─────────
@@ -486,6 +548,112 @@ tool(
     const acc = a.adAccountId || META_AD_ACCOUNT;
     if (!acc) throw new Error("No adAccountId and META_AD_ACCOUNT_ID not set.");
     return mfetch(`${acc}/adspixels`, { fields: "id,name,last_fired_time,is_unavailable", limit: 100 });
+  }
+);
+
+// ───────── TikTok (Business / Marketing API) ─────────
+tool(
+  "tiktok_graph",
+  "TikTok Business/Marketing API call — flexible escape hatch, READ and WRITE. Base is open_api/<ver>/. method GET reads (params → query string; arrays/objects auto JSON-encoded); POST writes (params → JSON body). endpoint e.g. 'campaign/get' or 'campaign/status/update'. advertiser_id is auto-filled from TIKTOK_ADVERTISER_ID if you omit it. Does anything the token's scopes allow.",
+  obj({ endpoint: str("e.g. 'campaign/get', 'adgroup/get', 'report/integrated/get', 'campaign/status/update'."), method: enm(["GET", "POST"]), params: { type: "object", additionalProperties: true, description: "Query fields (GET) or body (POST). Arrays/objects allowed (fields, filtering, dimensions, metrics)." } }, ["endpoint"]),
+  (a) => {
+    const params: Record<string, any> = { ...(a.params ?? {}) };
+    if (params.advertiser_id === undefined && TIKTOK_ADVERTISER) params.advertiser_id = TIKTOK_ADVERTISER;
+    return tfetch(a.endpoint, params, a.method ?? "GET");
+  }
+);
+tool(
+  "tiktok_list_advertisers",
+  "[TikTok] List advertiser accounts this token can access (oauth2/advertiser/get). Requires TIKTOK_APP_ID + TIKTOK_APP_SECRET (this one call uses query-param auth). Use it to discover TIKTOK_ADVERTISER_ID.",
+  obj({}),
+  () => tiktokListAdvertisers()
+);
+tool(
+  "tiktok_ad_insights",
+  "[TikTok] Synchronous ad reporting (report/integrated/get) — spend, impressions, clicks, CTR, CPC, CPM, conversions, video views/retention. Aggregated at the chosen data_level. Video metrics available: video_play_actions, video_watched_2s/6s, video_views_p25/p50/p75/p100, average_video_play, engagements, likes, comments, shares.",
+  obj(
+    {
+      advertiserId: str("defaults to TIKTOK_ADVERTISER_ID."),
+      dataLevel: enm(["AUCTION_ADVERTISER", "AUCTION_CAMPAIGN", "AUCTION_ADGROUP", "AUCTION_AD"], "granularity; default AUCTION_CAMPAIGN."),
+      dimensions: arr(str(), "e.g. ['campaign_id'] or ['ad_id','stat_time_day']. Defaults to the id matching dataLevel."),
+      metrics: arr(str(), "e.g. ['spend','impressions','clicks','ctr','cpc','cpm','conversion']. Has a sensible default set."),
+      startDate: str("YYYY-MM-DD"),
+      endDate: str("YYYY-MM-DD"),
+      pageSize: { type: "integer", description: "Default 100 (max 1000)." },
+    },
+    ["startDate", "endDate"]
+  ),
+  (a) => {
+    const adv = a.advertiserId || TIKTOK_ADVERTISER;
+    if (!adv) throw new Error("No advertiserId and TIKTOK_ADVERTISER_ID not set.");
+    const level: string = a.dataLevel ?? "AUCTION_CAMPAIGN";
+    const dimByLevel: Record<string, string[]> = {
+      AUCTION_ADVERTISER: ["advertiser_id"],
+      AUCTION_CAMPAIGN: ["campaign_id"],
+      AUCTION_ADGROUP: ["adgroup_id"],
+      AUCTION_AD: ["ad_id"],
+    };
+    return tfetch(
+      "report/integrated/get",
+      {
+        advertiser_id: adv,
+        report_type: "BASIC",
+        data_level: level,
+        dimensions: a.dimensions ?? dimByLevel[level] ?? ["campaign_id"],
+        metrics: a.metrics ?? ["spend", "impressions", "clicks", "ctr", "cpc", "cpm", "conversion", "cost_per_conversion"],
+        start_date: a.startDate,
+        end_date: a.endDate,
+        page_size: a.pageSize ?? 100,
+      },
+      "GET"
+    );
+  }
+);
+tool(
+  "tiktok_list_campaigns",
+  "[TikTok] List campaigns on an advertiser (campaign/get) — id, name, objective, operation_status, budget, dates.",
+  obj({ advertiserId: str("defaults to TIKTOK_ADVERTISER_ID."), pageSize: { type: "integer", description: "Default 100." } }),
+  (a) => {
+    const adv = a.advertiserId || TIKTOK_ADVERTISER;
+    if (!adv) throw new Error("No advertiserId and TIKTOK_ADVERTISER_ID not set.");
+    return tfetch("campaign/get", { advertiser_id: adv, page_size: a.pageSize ?? 100 }, "GET");
+  }
+);
+tool(
+  "tiktok_list_adgroups",
+  "[TikTok] List ad groups on an advertiser (adgroup/get) — targeting, budget, bid, status. Optionally filter by campaign.",
+  obj({ advertiserId: str("defaults to TIKTOK_ADVERTISER_ID."), campaignId: str("optional — only ad groups in this campaign."), pageSize: { type: "integer" } }),
+  (a) => {
+    const adv = a.advertiserId || TIKTOK_ADVERTISER;
+    if (!adv) throw new Error("No advertiserId and TIKTOK_ADVERTISER_ID not set.");
+    const params: Record<string, any> = { advertiser_id: adv, page_size: a.pageSize ?? 100 };
+    if (a.campaignId) params.filtering = { campaign_ids: [a.campaignId] };
+    return tfetch("adgroup/get", params, "GET");
+  }
+);
+tool(
+  "tiktok_list_ads",
+  "[TikTok] List ads on an advertiser (ad/get) — id, name, status, creative. Optionally filter by campaign or ad group.",
+  obj({ advertiserId: str("defaults to TIKTOK_ADVERTISER_ID."), campaignId: str("optional filter."), adgroupId: str("optional filter."), pageSize: { type: "integer" } }),
+  (a) => {
+    const adv = a.advertiserId || TIKTOK_ADVERTISER;
+    if (!adv) throw new Error("No advertiserId and TIKTOK_ADVERTISER_ID not set.");
+    const params: Record<string, any> = { advertiser_id: adv, page_size: a.pageSize ?? 100 };
+    const filtering: Record<string, unknown> = {};
+    if (a.campaignId) filtering.campaign_ids = [a.campaignId];
+    if (a.adgroupId) filtering.adgroup_ids = [a.adgroupId];
+    if (Object.keys(filtering).length) params.filtering = filtering;
+    return tfetch("ad/get", params, "GET");
+  }
+);
+tool(
+  "tiktok_update_campaign",
+  "[TikTok][WRITE] Change a campaign's status — ENABLE / DISABLE / DELETE (campaign/status/update). DISABLE is the reversible 'pause'; DELETE is permanent.",
+  obj({ advertiserId: str("defaults to TIKTOK_ADVERTISER_ID."), campaignId: str(), status: enm(["ENABLE", "DISABLE", "DELETE"]) }, ["campaignId", "status"]),
+  (a) => {
+    const adv = a.advertiserId || TIKTOK_ADVERTISER;
+    if (!adv) throw new Error("No advertiserId and TIKTOK_ADVERTISER_ID not set.");
+    return tfetch("campaign/status/update", { advertiser_id: adv, campaign_ids: [a.campaignId], operation_status: a.status }, "POST");
   }
 );
 
@@ -829,6 +997,13 @@ async function metaDiscoverAdAccounts(): Promise<{ id: string; name: string }[]>
   return out;
 }
 
+// TikTok discovery — turn a token (+ app id/secret) into the advertiser ids, so the user
+// picks by name instead of hunting for a numeric id.
+async function tiktokDiscoverAdvertisers(): Promise<{ id: string; name: string }[]> {
+  const r = (await tiktokListAdvertisers()) as { data?: { list?: { advertiser_id: string; advertiser_name: string }[] } };
+  return (r.data?.list ?? []).map((a) => ({ id: a.advertiser_id, name: a.advertiser_name }));
+}
+
 /** How Claude should launch the server: the binary itself, or `node dist/index.js` in dev. */
 function serverInvocation(): string[] {
   if (COMPILED) return [process.execPath];
@@ -890,6 +1065,19 @@ async function runDoctor(): Promise<boolean> {
     }
   }
 
+  if (!TIKTOK_TOKEN) {
+    say("TikTok:  —  optional, not connected (run setup to add TikTok Ads)");
+  } else {
+    try {
+      await tfetch("user/info", {}, "GET"); // token-level check; advertiser-agnostic
+      say(`TikTok:  ✅ connected`);
+      if (TIKTOK_ADVERTISER) say(`           Advertiser: ${TIKTOK_ADVERTISER}`);
+      else say("           (no TIKTOK_ADVERTISER_ID set — pass advertiserId per call or re-run setup)");
+    } catch (e) {
+      say(`TikTok:  ❌ ${shortErr(e)}`);
+    }
+  }
+
   if (GBP_ACCOUNT_ID) {
     try {
       await gfetch("https://mybusinessaccountmanagement.googleapis.com/v1/accounts");
@@ -916,7 +1104,7 @@ async function runSetupWizard(): Promise<void> {
     say(`saved only on this computer, at ${CONFIG_ENV}.`);
 
     // ── 1. GOOGLE ──
-    say("\n=== 1 of 2 · Google (Search Console + Analytics) ===");
+    say("\n=== 1 of 3 · Google (Search Console + Analytics) ===");
     say("You make a free Google Cloud “app” so Claude can read your data as you. Quick version");
     say("(full walkthrough with screenshots is in SETUP.md):");
     say("  a) https://console.cloud.google.com → create a project.");
@@ -951,7 +1139,7 @@ async function runSetupWizard(): Promise<void> {
     }
 
     // ── 2. META (Page + Ads) ──
-    say("\n=== 2 of 2 · Meta (Facebook / Instagram Page + Ads) ===");
+    say("\n=== 2 of 3 · Meta (Facebook / Instagram Page + Ads) ===");
     say("Claude reads your Page insights and ad performance with a Meta access token. Quick");
     say("version (full walkthrough in SETUP.md, Phase 3):");
     say("  a) https://business.facebook.com/settings → Users → System Users.");
@@ -983,6 +1171,47 @@ async function runSetupWizard(): Promise<void> {
       }
     } else {
       say("  Skipping Meta for now — re-run setup when you have the token.");
+    }
+
+    // ── 3. TIKTOK (Ads) ──
+    say("\n=== 3 of 3 · TikTok (Ads) ===");
+    say("Claude reads your TikTok ad performance with a long-lived Access Token. Quick version");
+    say("(full walkthrough in SETUP.md, TikTok section):");
+    say("  a) https://business-api.tiktok.com → become a developer → create an app (Marketing API).");
+    say("  b) Add the scopes you want (Ads Management / Reporting) and authorize your ad account.");
+    say("  c) Complete the OAuth flow once to mint an Access Token (it's long-lived).");
+    say("  d) Copy the Access Token, and your Advertiser ID (from TikTok Ads Manager).");
+    if (await askYesNo(rl, "\nReady to paste your TikTok Access Token?", false)) {
+      let token = "";
+      while (!token) token = await ask(rl, "  TikTok Access Token: ");
+      upsertEnv("TIKTOK_ACCESS_TOKEN", token);
+      reloadConfig();
+      try {
+        await tfetch("user/info", {}, "GET");
+        say("  ✅ Token works.");
+        // Advertiser id: auto-discover if the user has app_id+secret handy, else paste it.
+        say("  To auto-list your advertiser accounts I need the app's ID + secret (optional).");
+        if (await askYesNo(rl, "  Paste TikTok App ID + Secret to auto-discover advertisers?", false)) {
+          const appId = await ask(rl, "  TikTok App ID: ");
+          const appSecret = await ask(rl, "  TikTok App Secret: ");
+          if (appId) upsertEnv("TIKTOK_APP_ID", appId);
+          if (appSecret) upsertEnv("TIKTOK_APP_SECRET", appSecret);
+          reloadConfig();
+          const advId = await pickOne(rl, "advertiser", await tiktokDiscoverAdvertisers().catch(() => []));
+          if (advId) upsertEnv("TIKTOK_ADVERTISER_ID", advId);
+          else say("    (couldn't list advertisers — paste the id below instead.)");
+        }
+        if (!TIKTOK_ADVERTISER) {
+          const advId = await ask(rl, "  Advertiser ID (from TikTok Ads Manager, numeric): ");
+          if (advId) upsertEnv("TIKTOK_ADVERTISER_ID", advId);
+        }
+        reloadConfig();
+      } catch (e) {
+        say(`  ❌ That token didn't work: ${shortErr(e)}`);
+        say("  Usual cause: the token wasn't authorized for the Marketing/Reporting scope.");
+      }
+    } else {
+      say("  Skipping TikTok for now — re-run setup when you have the token.");
     }
 
     // ── Verify + register ──

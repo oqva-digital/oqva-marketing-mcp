@@ -68,6 +68,21 @@ Different platform, its own token. Needed for the Meta audit + any tidy/manageme
 
 ---
 
+## TikTok (Ads) — optional
+Its own platform and token; independent of Google and Meta. Skip if you don't run TikTok ads.
+
+1. **Developer app** — go to [TikTok for Business / Marketing API](https://business-api.tiktok.com), register as a developer, and create an app with the **Marketing API** product. Add the scopes you need (**Ad Account Management**, **Reporting**, and **Ads Management** if you want Claude to pause/enable campaigns).
+2. **Authorize + token** — complete the app's OAuth flow once for your ad account; TikTok returns a **long-lived Access Token** (it doesn't expire like Meta's Graph Explorer tokens, but can be revoked). Copy it.
+3. **Advertiser ID** — the numeric id shown in [TikTok Ads Manager](https://ads.tiktok.com) (or list them with `tiktok_list_advertisers` once App ID + Secret are set).
+4. `.env` (or run `setup` and paste when asked):
+   - `TIKTOK_ACCESS_TOKEN` — required. Sent in the `Access-Token` header.
+   - `TIKTOK_ADVERTISER_ID` — the default advertiser (or pass `advertiserId` per call).
+   - `TIKTOK_APP_ID` + `TIKTOK_APP_SECRET` — optional, only to auto-discover advertiser ids (`tiktok_list_advertisers` / `oauth2/advertiser/get`).
+
+> The reporting tool (`tiktok_ad_insights`) hits `report/integrated/get` synchronously; video metrics like `video_views_p25/p50/p75/p100` and `average_video_play` are available in the `metrics` list.
+
+---
+
 ## Phase 4 — GBP API (slow approval — apply today)
 GBP works through the **same OAuth token** (the `business.manage` scope) — but Google must approve API access first (~1–3 weeks). Runs in the background; nothing else waits on it.
 

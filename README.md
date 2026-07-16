@@ -1,11 +1,12 @@
 # OQVA Marketing MCP
 
 Connect Claude to your marketing data. This [MCP](https://modelcontextprotocol.io) server lets
-Claude read and manage your Google and Meta accounts directly:
+Claude read and manage your Google, Meta, and TikTok accounts directly:
 
 - **Google Search Console** — search analytics, sitemaps, URL inspection
 - **Google Analytics 4** — reports, realtime, and configuration
 - **Meta (Facebook & Instagram)** — Page insights and Ads
+- **TikTok (Ads)** — campaign/ad-group/ad management and reporting
 - **Google Tag Manager** — tags, triggers, variables, publishing
 - **Google Business Profile** — locations, performance, reviews *(needs Google approval)*
 
@@ -70,6 +71,10 @@ oqva-marketing-mcp auth      re-do the Google sign-in
 | `meta_list_campaigns` · `meta_list_custom_audiences` · `meta_list_pixels` | List campaigns / audiences / pixels on an ad account. |
 | `meta_update_campaign` | **[write]** pause / archive / activate a campaign. |
 | `meta_delete_custom_audience` | **[write]** delete a custom audience. |
+| `tiktok_graph` | **[write-capable]** Raw TikTok Business/Marketing API call — GET / POST escape hatch. |
+| `tiktok_ad_insights` | Ad reporting — spend, clicks, CTR, CPC/CPM, conversions, video retention. |
+| `tiktok_list_advertisers` · `tiktok_list_campaigns` · `tiktok_list_adgroups` · `tiktok_list_ads` | Enumerate TikTok Ads assets. |
+| `tiktok_update_campaign` | **[write]** enable / disable / delete a campaign. |
 | `ga4_account_summaries` | List your GA4 accounts/properties + their **numeric** ids. |
 | `ga4_list_key_events` · `ga4_create_key_event` | **[write]** read / create Key events (conversions). |
 | `ga4_list_custom_dimensions` · `ga4_create_custom_dimension` | **[write]** read / create custom dimensions. |
