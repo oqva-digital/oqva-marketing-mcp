@@ -62,6 +62,7 @@ oqva-marketing-mcp auth      re-do the Google sign-in
 | `gbp_list_accounts` / `gbp_list_locations` | Business Profile accounts + locations. *(needs GBP API approval)* |
 | `gbp_get_location` | One location in full — description, hours, service area, service items. *(needs approval)* |
 | `gbp_search_categories` | Look up a category id by display name (`Cleaners` → `categories/gcid:cleaners`). |
+| `gbp_search_places` | Look up Google Place IDs for a `serviceArea`. *(needs `GOOGLE_MAPS_API_KEY`)* |
 | `gbp_update_location` | **[write]** Edit categories, phone, website, description, hours, service area, services. Supports `validateOnly` dry runs. *(needs approval)* |
 | `gbp_performance` | Daily impressions/calls/website-clicks/directions for a location. *(needs approval)* |
 | `gbp_list_reviews` | Reviews (rating, text, reply). *(needs approval)* |

@@ -81,11 +81,17 @@ let META_TOKEN = process.env.META_ACCESS_TOKEN ?? "";
 let META_AD_ACCOUNT = process.env.META_AD_ACCOUNT_ID ?? "";
 let META_PAGE_ID = process.env.META_PAGE_ID ?? "";
 let META_API_VER = process.env.META_API_VERSION ?? "v22.0";
+// Places API (New) is the odd one out: it authenticates with an API key, not the
+// OAuth token. Using OAuth there would mean adding the very broad cloud-platform
+// scope to a token that otherwise only reaches marketing surfaces — a bad trade
+// for a place-name lookup. A key restricted to Places API is far narrower.
+let MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY ?? "";
 /** Re-read every config value from process.env — called after `setup` writes new ones. */
 function reloadConfig(): void {
   GSC_SITE_URL = process.env.GSC_SITE_URL ?? "";
   GA4_PROPERTY_ID = process.env.GA4_PROPERTY_ID ?? "";
   GBP_ACCOUNT_ID = process.env.GBP_ACCOUNT_ID ?? "";
+  MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY ?? "";
   OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID ?? "";
   OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET ?? "";
   OAUTH_REFRESH_TOKEN = process.env.GOOGLE_OAUTH_REFRESH_TOKEN ?? "";
@@ -211,7 +217,7 @@ const arr = (items: unknown, description?: string) => ({ type: "array", items, .
 
 // ───────── status ─────────
 tool("config_status", "Report which marketing data sources are configured (no secrets revealed). Call first if a tool says 'not configured'.", obj({}), async () => ({
-  google: { credentialsConfigured: googleConfigured(), gscSiteUrl: GSC_SITE_URL || null, ga4PropertyId: GA4_PROPERTY_ID || null, gbpAccountId: GBP_ACCOUNT_ID || null },
+  google: { credentialsConfigured: googleConfigured(), gscSiteUrl: GSC_SITE_URL || null, ga4PropertyId: GA4_PROPERTY_ID || null, gbpAccountId: GBP_ACCOUNT_ID || null, mapsApiKeySet: !!MAPS_API_KEY },
   meta: { tokenSet: !!META_TOKEN, adAccountId: META_AD_ACCOUNT || null, pageId: META_PAGE_ID || null, apiVersion: META_API_VER },
 }));
 
@@ -367,6 +373,38 @@ tool(
         pageSize: "20",
       })}`
     )
+);
+
+tool(
+  "gbp_search_places",
+  "[GBP] Find Google Place IDs by name — the ids gbp_update_location needs for serviceArea. " +
+    "⚠️ A serviceArea entry without a valid placeId is SILENTLY DROPPED by the Business Profile API: no error, the locality just never appears. Always resolve ids here first, then read back what actually saved.",
+  obj({ query: str("Place to find, e.g. 'Kidlington, Oxfordshire, UK'."), regionCode: str("ISO 3166-1 alpha-2 bias. Default GB."), maxResults: { type: "integer", description: "Default 5." } }, ["query"]),
+  async (a) => {
+    if (!MAPS_API_KEY) {
+      throw new Error(
+        "GOOGLE_MAPS_API_KEY not set. Places API authenticates with an API key, not the OAuth token — the OAuth route would need the very broad cloud-platform scope. Create a key in the Google Cloud console, restrict it to Places API (New), and add GOOGLE_MAPS_API_KEY to .env."
+      );
+    }
+    const r = await fetch("https://places.googleapis.com/v1/places:searchText", {
+      method: "POST",
+      headers: {
+        "X-Goog-Api-Key": MAPS_API_KEY,
+        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ textQuery: a.query, regionCode: a.regionCode || "GB", maxResultCount: a.maxResults ?? 5 }),
+    });
+    const text = await r.text();
+    let body: unknown;
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      body = text;
+    }
+    if (!r.ok) throw new Error(`Places API ${r.status} ${r.statusText}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
+    return body;
+  }
 );
 
 tool(
