@@ -334,9 +334,68 @@ tool("gbp_list_accounts", "[GBP] List Business Profile accounts. NOTE: the Busin
 
 tool("gbp_list_locations", "[GBP] List locations for an account (name, title, address, website, categories).", obj({ account: str("accounts/123; defaults to GBP_ACCOUNT_ID.") }), (a) => {
   const acc = a.account || GBP_ACCOUNT_ID;
-  if (!acc) throw new Error("No account and GBP_ACCOUNT_ID not set.");
+  if (!acc) throw new Error("No account and GBP_ACCOUNT_ID not set. Run gbp_list_accounts to find it, then set GBP_ACCOUNT_ID in .env.");
   return gfetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${acc}/locations?readMask=name,title,storefrontAddress,websiteUri,phoneNumbers,categories,metadata`);
 });
+
+/**
+ * Every Location field worth reading. `name`/`metadata` are read-only; the rest
+ * are editable through gbp_update_location. Used as the default readMask so one
+ * get returns everything you'd want to inspect before a write.
+ */
+const GBP_LOCATION_FIELDS =
+  "name,title,phoneNumbers,categories,storefrontAddress,websiteUri,regularHours,specialHours,moreHours,serviceArea,serviceItems,profile,labels,openInfo,latlng,metadata";
+
+tool(
+  "gbp_get_location",
+  "[GBP] Read ONE location in full — description, hours, service area, service items and everything gbp_list_locations omits. Call this before any gbp_update_location so you know the current value of what you are about to overwrite.",
+  obj({ location: str("locations/123"), readMask: str("Comma-separated field paths. Defaults to every readable field.") }, ["location"]),
+  (a) => gfetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${a.location}?readMask=${encodeURIComponent(a.readMask || GBP_LOCATION_FIELDS)}`)
+);
+
+tool(
+  "gbp_search_categories",
+  "[GBP] Resolve a category display name to the resource name gbp_update_location needs — e.g. 'Cleaners' becomes 'categories/gcid:cleaners'. Categories are referenced by id, never by display text.",
+  obj({ query: str("Display name to search, e.g. 'Cleaners'."), regionCode: str("ISO 3166-1 alpha-2. Default GB."), languageCode: str("BCP 47. Default en.") }, ["query"]),
+  (a) =>
+    gfetch(
+      `https://mybusinessbusinessinformation.googleapis.com/v1/categories?${new URLSearchParams({
+        regionCode: a.regionCode || "GB",
+        languageCode: a.languageCode || "en",
+        view: "BASIC", // BASIC = name + displayName only; FULL drags in every serviceType and moreHoursType
+        filter: `displayName=${a.query}`,
+        pageSize: "20",
+      })}`
+    )
+);
+
+tool(
+  "gbp_update_location",
+  "[GBP][WRITE] Update a location's public business information — categories, phoneNumbers, websiteUri, profile (description), regularHours, serviceArea, serviceItems, title, storefrontAddress. " +
+    "updateMask REPLACES each masked field wholesale, so send the complete value: masking 'categories' while sending only additionalCategories WIPES the primary category. Read the current value with gbp_get_location first and merge. " +
+    "This edits a public, client-visible profile — run with validateOnly=true first and confirm with the owner before the real write.",
+  obj(
+    {
+      location: str("locations/123"),
+      updateMask: str("Comma-separated field paths to replace, e.g. 'categories' or 'phoneNumbers,websiteUri'. Mask the PARENT field — 'categories', not 'categories.additionalCategories'."),
+      update: {
+        type: "object",
+        description:
+          'Partial Location body carrying the new values, e.g. {"categories":{"primaryCategory":{"name":"categories/gcid:house_cleaning_service"},"additionalCategories":[{"name":"categories/gcid:cleaners"}]}}',
+      },
+      validateOnly: { type: "boolean", description: "Dry run — Google validates and returns the would-be result WITHOUT saving. Default false." },
+    },
+    ["location", "updateMask", "update"]
+  ),
+  (a) => {
+    const qs = new URLSearchParams({ updateMask: a.updateMask });
+    if (a.validateOnly) qs.set("validateOnly", "true");
+    return gfetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${a.location}?${qs}`, {
+      method: "PATCH",
+      body: JSON.stringify(a.update ?? {}),
+    });
+  }
+);
 
 tool(
   "gbp_performance",

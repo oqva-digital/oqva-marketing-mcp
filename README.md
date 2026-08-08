@@ -60,6 +60,9 @@ oqva-marketing-mcp auth      re-do the Google sign-in
 | `ga4_run_report` | GA4 Data API: sessions/users/conversions/events by any dimensions, any date range. |
 | `ga4_realtime` | Active users in the last 30 min. |
 | `gbp_list_accounts` / `gbp_list_locations` | Business Profile accounts + locations. *(needs GBP API approval)* |
+| `gbp_get_location` | One location in full — description, hours, service area, service items. *(needs approval)* |
+| `gbp_search_categories` | Look up a category id by display name (`Cleaners` → `categories/gcid:cleaners`). |
+| `gbp_update_location` | **[write]** Edit categories, phone, website, description, hours, service area, services. Supports `validateOnly` dry runs. *(needs approval)* |
 | `gbp_performance` | Daily impressions/calls/website-clicks/directions for a location. *(needs approval)* |
 | `gbp_list_reviews` | Reviews (rating, text, reply). *(needs approval)* |
 | `gbp_reply_review` | **[write]** Reply to a review. *(needs approval)* |
