@@ -69,9 +69,7 @@ oqva-marketing-mcp auth      re-do the Google sign-in
 | `gbp_reply_review` | **[write]** Reply to a review. *(needs approval)* |
 | `gbp_list_available_attributes` / `gbp_get_attributes` | Attributes the category allows vs. the ones actually set. |
 | `gbp_update_attributes` | **[write]** Set/clear profile attributes (booking link, socials, "online estimates"…). |
-| `gbp_list_questions` | Public Q&A on the profile. *(needs `mybusinessqanda.googleapis.com` enabled)* |
-| `gbp_ask_question` / `gbp_answer_question` | **[write]** Seed a merchant Q&A pair. |
-| `gbp_list_posts` | Google Posts on the profile (v4 API). |
+| `gbp_list_posts` | Google Posts on the profile (v4 API). *(No Q&A tools: Google shut the Q&A API down on 2025-11-03.)* |
 | `gbp_create_post` / `gbp_delete_post` | **[write]** Publish / remove a Google Post (summary + CTA button + photo). |
 | `meta_graph` | **[write-capable]** Raw Meta Graph/Marketing API call — GET / POST / DELETE escape hatch. |
 | `meta_page_insights` | Facebook Page insights. |

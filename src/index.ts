@@ -471,27 +471,11 @@ tool(
     })
 );
 
-// ───────── GBP Q&A (needs mybusinessqanda.googleapis.com enabled on the GCP project) ─────────
-tool(
-  "gbp_list_questions",
-  "[GBP] Questions (with answers) on a location's public Q&A surface. 403 SERVICE_DISABLED means mybusinessqanda.googleapis.com is not enabled on the GCP project — the error carries the enable link.",
-  obj({ location: str("locations/123") }, ["location"]),
-  (a) => gfetch(`https://mybusinessqanda.googleapis.com/v1/${a.location}/questions`)
-);
-
-tool(
-  "gbp_ask_question",
-  "[GBP][WRITE] Post a question on the location's public Q&A as the merchant — the seed half of a seeded Q&A pair; pair it with gbp_answer_question. Public and client-visible: confirm with the owner before writing.",
-  obj({ location: str("locations/123"), text: str("The question text.") }, ["location", "text"]),
-  (a) => gfetch(`https://mybusinessqanda.googleapis.com/v1/${a.location}/questions`, { method: "POST", body: JSON.stringify({ text: a.text }) })
-);
-
-tool(
-  "gbp_answer_question",
-  "[GBP][WRITE] Post (or replace — it's an upsert) the merchant's answer to a question. Public and client-visible: confirm with the owner before writing.",
-  obj({ question: str("Full question name, e.g. locations/123/questions/456."), text: str("The answer text.") }, ["question", "text"]),
-  (a) => gfetch(`https://mybusinessqanda.googleapis.com/v1/${a.question}/answers:upsert`, { method: "POST", body: JSON.stringify({ answer: { text: a.text } }) })
-);
+// NOTE: no Q&A tools, deliberately. The My Business Q&A API was DISCONTINUED
+// by Google on 2025-11-03 (every call 501s API_UNSUPPORTED — measured
+// 2026-08-12 with the service enabled). A 403 SERVICE_DISABLED on
+// mybusinessqanda.googleapis.com is a mirage: enabling the service just
+// exposes the 501. Do not rebuild these.
 
 // ───────── GBP Posts (legacy v4 API — same service as reviews) ─────────
 tool(
