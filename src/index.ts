@@ -9,6 +9,7 @@
  *   • Google Analytics 4      (Data API: reports + realtime)
  *   • Google Business Profile (locations, performance, reviews)   [needs API allowlist]
  *   • Meta / Facebook         (Graph API: page + ad insights, raw escape hatch)
+ *   • DataForSEO + Google suggest (keyword volumes, live SERPs, query mining, demand radar)
  *
  * How it stays dependency-free:
  *   - MCP transport = newline-delimited JSON-RPC 2.0 over stdio, hand-rolled below.
@@ -20,7 +21,7 @@
  * local .env (see .env.example) — never hard-coded, never committed. Nothing is
  * required to *start*; each tool reports clearly when its source isn't configured.
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -86,12 +87,19 @@ let META_API_VER = process.env.META_API_VERSION ?? "v22.0";
 // scope to a token that otherwise only reaches marketing surfaces — a bad trade
 // for a place-name lookup. A key restricted to Places API is far narrower.
 let MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY ?? "";
+// DataForSEO (keyword volumes + live SERPs) is pay-per-call over HTTP Basic auth —
+// no subscription. Powers kw_volume / kw_serp / kw_radar; kw_suggest is free
+// (Google suggest) and needs no credentials at all.
+let DATAFORSEO_LOGIN = process.env.DATAFORSEO_LOGIN ?? "";
+let DATAFORSEO_PASSWORD = process.env.DATAFORSEO_PASSWORD ?? "";
 /** Re-read every config value from process.env — called after `setup` writes new ones. */
 function reloadConfig(): void {
   GSC_SITE_URL = process.env.GSC_SITE_URL ?? "";
   GA4_PROPERTY_ID = process.env.GA4_PROPERTY_ID ?? "";
   GBP_ACCOUNT_ID = process.env.GBP_ACCOUNT_ID ?? "";
   MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY ?? "";
+  DATAFORSEO_LOGIN = process.env.DATAFORSEO_LOGIN ?? "";
+  DATAFORSEO_PASSWORD = process.env.DATAFORSEO_PASSWORD ?? "";
   OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID ?? "";
   OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET ?? "";
   OAUTH_REFRESH_TOKEN = process.env.GOOGLE_OAUTH_REFRESH_TOKEN ?? "";
@@ -183,6 +191,29 @@ async function mfetch(path: string, params: Record<string, string | number | und
   if (!r.ok) throw new Error(`Meta Graph API ${r.status} (${method}): ${JSON.stringify(body)}`);
   return body;
 }
+/** DataForSEO call — every endpoint is POST with a JSON ARRAY of task objects; we send
+ *  one task per call and return its `result`. Throws on HTTP errors AND on DataForSEO's
+ *  own per-task status (20000 = ok — anything else is a real failure, not data). */
+async function dfetch(path: string, task: Record<string, unknown>): Promise<unknown> {
+  if (!DATAFORSEO_LOGIN || !DATAFORSEO_PASSWORD) {
+    throw new Error("DataForSEO not configured — set DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD. See README.");
+  }
+  const r = await fetch(`https://api.dataforseo.com${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${DATAFORSEO_LOGIN}:${DATAFORSEO_PASSWORD}`).toString("base64")}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify([task]),
+  });
+  const body = (await r.json().catch(() => ({}))) as any;
+  if (!r.ok) throw new Error(`DataForSEO ${r.status} ${r.statusText}: ${JSON.stringify(body).slice(0, 400)}`);
+  const t = body?.tasks?.[0];
+  if (!t || t.status_code !== 20000) {
+    throw new Error(`DataForSEO task error ${t?.status_code ?? body?.status_code}: ${t?.status_message ?? body?.status_message ?? "no task returned"}`);
+  }
+  return t.result;
+}
 
 // ─────────────────────────── tool registry + result helpers ───────────────────────────
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -219,6 +250,7 @@ const arr = (items: unknown, description?: string) => ({ type: "array", items, .
 tool("config_status", "Report which marketing data sources are configured (no secrets revealed). Call first if a tool says 'not configured'.", obj({}), async () => ({
   google: { credentialsConfigured: googleConfigured(), gscSiteUrl: GSC_SITE_URL || null, ga4PropertyId: GA4_PROPERTY_ID || null, gbpAccountId: GBP_ACCOUNT_ID || null, mapsApiKeySet: !!MAPS_API_KEY },
   meta: { tokenSet: !!META_TOKEN, adAccountId: META_AD_ACCOUNT || null, pageId: META_PAGE_ID || null, apiVersion: META_API_VER },
+  dataforseo: { configured: !!(DATAFORSEO_LOGIN && DATAFORSEO_PASSWORD) },
 }));
 
 // ───────── Google Search Console ─────────
@@ -806,6 +838,303 @@ tool(
       method: a.method,
       body: a.body,
     })
+);
+
+// ───────── Keyword research + demand radar (DataForSEO + Google suggest) ─────────
+// DataForSEO is pay-per-call: volumes ≈ $0.05–0.075 per 1k keywords, a SERP a fraction
+// of a cent. Google suggest is free and unauthenticated. No subscriptions anywhere.
+
+const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
+
+/** Run fn over items with at most `limit` in flight (result order preserved). */
+async function pmap<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= items.length) return;
+        out[i] = await fn(items[i]);
+      }
+    })
+  );
+  return out;
+}
+
+/** Volume/CPC/competition rows for any number of keywords — deduped, chunked ≤500 per API call. */
+async function dfVolumeRows(keywords: string[], location: number, language: string): Promise<any[]> {
+  const uniq = [...new Set(keywords.map((k) => k.trim().toLowerCase()).filter(Boolean))];
+  if (!uniq.length) throw new Error("No keywords given.");
+  const rows: any[] = [];
+  for (let i = 0; i < uniq.length; i += 500) {
+    const result = (await dfetch("/v3/keywords_data/google_ads/search_volume/live", {
+      keywords: uniq.slice(i, i + 500),
+      location_code: location,
+      language_code: language,
+    })) as any[] | null;
+    rows.push(...(result ?? []));
+  }
+  return rows;
+}
+
+/** Top-10 organic + ads-present flag for one keyword. depth 20 because paid/feature
+ *  items share the depth budget with organic — 10 could return fewer than 10 organic. */
+async function dfSerpTop10(keyword: string, location: number, language: string): Promise<{ ads: boolean; organic: { position: number; domain: string; title: string; url: string }[] }> {
+  const result = (await dfetch("/v3/serp/google/organic/live/advanced", {
+    keyword,
+    location_code: location,
+    language_code: language,
+    depth: 20,
+  })) as any[] | null;
+  const items: any[] = result?.[0]?.items ?? [];
+  return {
+    ads: items.some((it) => it?.type === "paid"),
+    organic: items
+      .filter((it) => it?.type === "organic")
+      .slice(0, 10)
+      .map((it) => ({ position: it.rank_group, domain: it.domain, title: it.title, url: it.url })),
+  };
+}
+
+/** One Google-suggest lookup — the free autocomplete endpoint, no key needed. */
+async function fetchSuggest(q: string, gl: string, hl: string): Promise<string[]> {
+  const u = new URL("https://suggestqueries.google.com/complete/search");
+  u.searchParams.set("client", "firefox"); // firefox = plain JSON: [query, [suggestions]]
+  u.searchParams.set("q", q);
+  u.searchParams.set("gl", gl);
+  u.searchParams.set("hl", hl);
+  const r = await fetch(u);
+  if (!r.ok) throw new Error(`Google suggest ${r.status} for "${q}" — the free endpoint throttles bursts; wait a minute and retry.`);
+  const body = (await r.json().catch(() => null)) as unknown;
+  const list = Array.isArray(body) && Array.isArray((body as unknown[])[1]) ? ((body as unknown[])[1] as unknown[]) : [];
+  return list.filter((s): s is string => typeof s === "string");
+}
+
+/** Does `term` itself come back when its leading words are typed? A boolean probe, not a mine. */
+async function suggestPresent(term: string, gl: string, hl: string): Promise<boolean> {
+  const words = term.split(/\s+/);
+  const probe = words.length > 1 ? words.slice(0, -1).join(" ") : term.slice(0, Math.max(1, term.length - 2));
+  const got = await fetchSuggest(probe, gl, hl);
+  await sleep(150); // stay polite — this endpoint 403s bursts
+  return got.some((s) => s.trim().toLowerCase() === term);
+}
+
+// DataForSEO country codes are 2000 + the ISO 3166-1 numeric code; Google suggest wants
+// alpha-2 `gl`. Cover the plausible markets; unknown (e.g. city-level) codes fall back to "us".
+const ISO_GL: Record<number, string> = {
+  840: "us", 826: "gb", 372: "ie", 36: "au", 554: "nz", 124: "ca", 276: "de", 250: "fr",
+  724: "es", 380: "it", 528: "nl", 56: "be", 40: "at", 756: "ch", 752: "se", 208: "dk",
+  578: "no", 246: "fi", 616: "pl", 620: "pt", 484: "mx", 76: "br", 356: "in", 392: "jp",
+  702: "sg", 710: "za", 784: "ae",
+};
+const glFor = (location: number): string => ISO_GL[location - 2000] ?? "us";
+
+tool(
+  "kw_volume",
+  "Keyword → monthly search volume / CPC / competition, batched (DataForSEO, Google Ads data). Send hundreds at once — deduped and chunked 500 per API call (≈ $0.05–0.075 per 1k keywords). Includes the 12-month monthly_searches trend.",
+  obj(
+    {
+      keywords: arr(str(), "Keywords to look up."),
+      location: { type: "integer", description: "DataForSEO location code. Default 2840 (US); 2826 is the UK." },
+      language: str("Language code. Default en."),
+    },
+    ["keywords"]
+  ),
+  async (a) => {
+    const rows = await dfVolumeRows(a.keywords ?? [], a.location ?? 2840, a.language || "en");
+    return rows.map((r) => ({
+      keyword: r.keyword,
+      search_volume: r.search_volume ?? null,
+      cpc: r.cpc ?? null,
+      competition: r.competition ?? null,
+      competition_index: r.competition_index ?? null,
+      monthly_searches: r.monthly_searches ?? null,
+    }));
+  }
+);
+
+tool(
+  "kw_serp",
+  "Live top-10 Google organic results for one keyword (DataForSEO) — position, domain, title, url — plus ads:true when paid results share the SERP (the commercial-intent signal). A fraction of a cent per query.",
+  obj(
+    {
+      keyword: str("The search query."),
+      location: { type: "integer", description: "DataForSEO location code. Default 2840 (US); 2826 is the UK." },
+      language: str("Language code. Default en."),
+    },
+    ["keyword"]
+  ),
+  (a) => dfSerpTop10(a.keyword, a.location ?? 2840, a.language || "en")
+);
+
+tool(
+  "kw_suggest",
+  "Mine Google autocomplete for a topic — FREE, no credentials. Expands the seed a–z, recurses on new finds, and returns the deduped sorted list: the visible query surface of a topic, i.e. what people actually type. depth 2 takes ~a minute; depth 3 can take several.",
+  obj(
+    {
+      seed: str("Topic to mine, e.g. 'crm software'."),
+      gl: str("Country for suggestions (ISO alpha-2). Default us."),
+      hl: str("Language. Default en."),
+      depth: { type: "integer", description: "Recursion depth 1–3. Default 2." },
+    },
+    ["seed"]
+  ),
+  async (a) => {
+    const gl = a.gl || "us";
+    const hl = a.hl || "en";
+    const depth = Math.min(Math.max(a.depth ?? 2, 1), 3);
+    const seed = String(a.seed).trim().toLowerCase();
+    if (!seed) throw new Error("Empty seed.");
+    const found = new Set<string>();
+    const queried = new Set<string>();
+    const probe = async (term: string): Promise<string[]> => {
+      if (queried.has(term)) return [];
+      queried.add(term);
+      const got = await fetchSuggest(term, gl, hl);
+      await sleep(150);
+      const fresh = got.map((s) => s.trim().toLowerCase()).filter((s) => s && !found.has(s));
+      for (const s of fresh) found.add(s);
+      return fresh;
+    };
+    // Level 1: the seed itself, then "seed a" … "seed z". Deeper levels re-probe each
+    // NEW find once — the a–z fan-out stays seed-only or the request count explodes.
+    let frontier = await probe(seed);
+    for (const c of "abcdefghijklmnopqrstuvwxyz") frontier.push(...(await probe(`${seed} ${c}`)));
+    for (let level = 2; level <= depth; level++) {
+      const next: string[] = [];
+      for (const term of frontier) next.push(...(await probe(term)));
+      frontier = next;
+    }
+    const suggestions = [...found].sort();
+    return { seed, count: suggestions.length, suggestions };
+  }
+);
+
+tool(
+  "kw_radar",
+  "The demand-radar sweep. Reads the cluster file ~/.oqva-marketing-mcp/radar/<slug>.json ({clusters:{group:[terms]}, watchlist:[terms], locations:[codes]}), sweeps volume + top-10 SERP + suggest presence for every term × location, snapshots to radar/<slug>/<date>.json, and returns ONLY what changed since the previous snapshot: watchlist crossings (first suggest appearance / first nonzero volume — the headline), suggest appearances/disappearances on tracked terms, volume shifts >20%, and SERP top-10 entrants/dropouts/movers of ≥3 positions. First ever run returns {baseline:true}. Run weekly.",
+  obj(
+    {
+      slug: str("Names the cluster file: radar/<slug>.json."),
+      location: { type: "integer", description: "Sweep one DataForSEO location code only. Default: every code in the file's locations." },
+    },
+    ["slug"]
+  ),
+  async (a) => {
+    const radarDir = resolve(CONFIG_DIR, "radar");
+    const clusterFile = resolve(radarDir, `${a.slug}.json`);
+    if (!existsSync(clusterFile)) {
+      throw new Error(`No cluster file at ${clusterFile} — create it: {"clusters":{"group":["term",…]},"watchlist":["term",…],"locations":[2840]}.`);
+    }
+    // Only clusters / watchlist / locations are read — real files carry extra keys
+    // (notes, parked lists) and those must never break a sweep.
+    const cfg = JSON.parse(readFileSync(clusterFile, "utf8")) as Record<string, any>;
+    const norm = (s: unknown) => String(s).trim().toLowerCase();
+    const tracked: string[] = [...new Set(Object.values(cfg.clusters ?? {}).filter(Array.isArray).flat().map(norm))];
+    const watchlist: string[] = [...new Set((Array.isArray(cfg.watchlist) ? cfg.watchlist : []).map(norm))];
+    const allTerms = [...new Set([...tracked, ...watchlist])];
+    if (!allTerms.length) throw new Error(`${clusterFile} has no terms — fill clusters and/or watchlist.`);
+    const locations: number[] = a.location ? [a.location] : Array.isArray(cfg.locations) && cfg.locations.length ? cfg.locations : [2840];
+
+    // ── sweep: batched volume (all terms) + SERP (tracked only) + suggest probe, per location ──
+    const byLocation: Record<string, { volume: Record<string, any>; suggest: Record<string, boolean>; serp: Record<string, any> }> = {};
+    for (const loc of locations) {
+      const volume: Record<string, any> = {};
+      for (const row of await dfVolumeRows(allTerms, loc, "en")) {
+        volume[norm(row.keyword)] = { search_volume: row.search_volume ?? null, cpc: row.cpc ?? null, competition: row.competition ?? null };
+      }
+      const serpRows = await pmap(tracked, 5, (t) => dfSerpTop10(t, loc, "en"));
+      const serp: Record<string, any> = {};
+      tracked.forEach((t, i) => (serp[t] = serpRows[i]));
+      const gl = glFor(loc);
+      const suggest: Record<string, boolean> = {};
+      for (const t of allTerms) suggest[t] = await suggestPresent(t, gl, "en");
+      byLocation[String(loc)] = { volume, suggest, serp };
+    }
+
+    // ── snapshot: one file per run day, overwritten on same-day re-run; old days are
+    //    never deleted — the history is the product ──
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const snapDir = resolve(radarDir, String(a.slug));
+    mkdirSync(snapDir, { recursive: true });
+    const snapPath = resolve(snapDir, `${today}.json`);
+    writeFileSync(snapPath, JSON.stringify({ slug: a.slug, date: today, locations, tracked, watchlist, byLocation }, null, 2));
+
+    const priorFile = readdirSync(snapDir)
+      .filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f) && f !== `${today}.json`)
+      .sort()
+      .pop();
+    if (!priorFile) {
+      return { baseline: true, date: today, snapshot: snapPath, counts: { tracked: tracked.length, watchlist: watchlist.length, locations: locations.length } };
+    }
+    const prev = JSON.parse(readFileSync(resolve(snapDir, priorFile), "utf8")) as Record<string, any>;
+
+    // ── diff: return ONLY what changed since the prior snapshot ──
+    const watchlistCrossings: any[] = [];
+    const suggestChanges: any[] = [];
+    const volumeShifts: any[] = [];
+    const serpChanges: any[] = [];
+    /** Best (first-seen) position per domain — a domain can hold several top-10 slots. */
+    const bestPos = (top: any[]): Map<string, number> => {
+      const m = new Map<string, number>();
+      for (const it of top ?? []) if (it?.domain && !m.has(it.domain)) m.set(it.domain, it.position);
+      return m;
+    };
+    for (const loc of locations) {
+      const now = byLocation[String(loc)];
+      const old = prev.byLocation?.[String(loc)];
+      if (!old) continue; // location not in the prior snapshot — it baselines silently
+      const crossedVolume = new Set<string>();
+      for (const t of watchlist) {
+        // Absent from the prior snapshot counts as not-present/zero: a term just added
+        // to the watchlist that already registers should fire once, on purpose.
+        if (!(old.suggest?.[t] ?? false) && now.suggest[t]) {
+          watchlistCrossings.push({ term: t, location: loc, event: "first suggest appearance" });
+        }
+        const nowVol = now.volume[t]?.search_volume ?? 0;
+        if (!(old.volume?.[t]?.search_volume ?? 0) && nowVol > 0) {
+          watchlistCrossings.push({ term: t, location: loc, event: "first nonzero volume", search_volume: nowVol });
+          crossedVolume.add(t);
+        }
+      }
+      for (const t of tracked) {
+        if (!(t in (old.suggest ?? {}))) continue;
+        if (!!old.suggest[t] !== !!now.suggest[t]) {
+          suggestChanges.push({ term: t, location: loc, change: now.suggest[t] ? "appeared in suggest" : "disappeared from suggest" });
+        }
+      }
+      for (const t of allTerms) {
+        if (crossedVolume.has(t)) continue; // already reported loudly as a crossing
+        const o = old.volume?.[t]?.search_volume;
+        const n = now.volume[t]?.search_volume;
+        if (o == null || n == null || (o === 0 && n === 0)) continue;
+        if (o === 0 ? n > 0 : Math.abs(n - o) / o > 0.2) volumeShifts.push({ term: t, location: loc, from: o, to: n });
+      }
+      for (const t of tracked) {
+        const oldTop = old.serp?.[t]?.organic;
+        if (!oldTop) continue;
+        const was = bestPos(oldTop);
+        const is = bestPos(now.serp[t]?.organic ?? []);
+        const entrants = [...is].filter(([dm]) => !was.has(dm)).map(([domain, position]) => ({ domain, position }));
+        const dropouts = [...was].filter(([dm]) => !is.has(dm)).map(([domain, position]) => ({ domain, was: position }));
+        const movers = [...is]
+          .filter(([dm, p]) => was.has(dm) && Math.abs(p - (was.get(dm) as number)) >= 3)
+          .map(([domain, p]) => ({ domain, from: was.get(domain), to: p }));
+        if (entrants.length || dropouts.length || movers.length) serpChanges.push({ term: t, location: loc, entrants, dropouts, movers });
+      }
+    }
+    return {
+      date: today,
+      comparedTo: priorFile.replace(/\.json$/, ""),
+      snapshot: snapPath,
+      watchlistCrossings, // the headline: first sighting of demand you predicted
+      suggestChanges,
+      volumeShifts,
+      serpChanges,
+    };
+  }
 );
 
 // ─────────────────────────── MCP transport: JSON-RPC 2.0 over stdio ───────────────────────────

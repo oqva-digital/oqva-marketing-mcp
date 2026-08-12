@@ -8,6 +8,7 @@ Claude read and manage your Google and Meta accounts directly:
 - **Meta (Facebook & Instagram)** — Page insights and Ads
 - **Google Tag Manager** — tags, triggers, variables, publishing
 - **Google Business Profile** — locations, performance, reviews *(needs Google approval)*
+- **Keyword research & demand radar** — search volumes, live SERPs, autocomplete mining, change tracking *(DataForSEO pay-per-call; the autocomplete tool is free)*
 
 ## Install
 
@@ -86,10 +87,14 @@ oqva-marketing-mcp auth      re-do the Google sign-in
 | `gsc_submit_sitemap` · `gsc_delete_sitemap` · `gsc_add_site` | **[write]** manage sitemaps + properties. |
 | `gsc_request_indexing` | **[write]** request a recrawl (Indexing API). |
 | `gtm` | **[write + publish]** Google Tag Manager API escape hatch (tags/triggers/variables → version → publish). |
+| `kw_volume` | Keyword search volumes + CPC + competition + 12-month trend, batched 500/call. *(needs `DATAFORSEO_LOGIN`/`_PASSWORD` — pay-per-call, no subscription)* |
+| `kw_serp` | Live top-10 organic Google results for a keyword, plus whether ads share the SERP. *(needs DataForSEO)* |
+| `kw_suggest` | Mine Google autocomplete around a seed topic — what people actually type. Free, no key. |
+| `kw_radar` | Sweep a saved keyword cluster file (volume + SERP + suggest presence per market), snapshot it, and report only what **changed** — watchlist first-appearances, volume shifts, SERP movers. *(needs DataForSEO)* |
 
 ## Security
 
-- Credentials live only at `~/.oqva-marketing-mcp/.env` on your machine, and go only to Google and Meta.
+- Credentials live only at `~/.oqva-marketing-mcp/.env` on your machine, and go only to Google, Meta, and DataForSEO.
 - Write tools are tagged `[WRITE]`; Claude confirms before anything destructive or public (a review reply, a Tag Manager publish).
 
 ## Build from source
