@@ -436,6 +436,101 @@ tool(
 );
 
 tool(
+  "gbp_list_available_attributes",
+  "[GBP] The attributes Google will accept for a location's category — id, valueType (BOOL/ENUM/URL/REPEATED_ENUM), display name and any enum options. Attributes not in this list are rejected; the list depends on the location's primary category, so re-check after any category change.",
+  obj({ location: str("locations/123") }, ["location"]),
+  (a) => gfetch(`https://mybusinessbusinessinformation.googleapis.com/v1/attributes?${new URLSearchParams({ parent: a.location, pageSize: "200" })}`)
+);
+
+tool(
+  "gbp_get_attributes",
+  "[GBP] The attributes currently SET on a location. An empty result means none are set — not an error. Read this before gbp_update_attributes so you know what a masked write will replace.",
+  obj({ location: str("locations/123") }, ["location"]),
+  (a) => gfetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${a.location}/attributes`)
+);
+
+tool(
+  "gbp_update_attributes",
+  "[GBP][WRITE] Set or clear attributes on a location. attributeMask lists the attribute ids being changed (e.g. 'attributes/url_appointment,attributes/offers_online_estimates'); a masked id with no matching entry in the body is CLEARED. Value shape depends on valueType — BOOL/ENUM: {name, values:[...]}; URL: {name, uriValues:[{uri}]}. " +
+    "Only ids from gbp_list_available_attributes save; anything else 400s. This edits a public, client-visible profile — confirm with the owner before writing, and read back with gbp_get_attributes after.",
+  obj(
+    {
+      location: str("locations/123"),
+      attributeMask: str("Comma-separated attribute ids being set or cleared."),
+      attributes: {
+        type: "array",
+        description: 'Attribute entries, e.g. [{"name":"attributes/offers_online_estimates","values":[true]},{"name":"attributes/url_appointment","uriValues":[{"uri":"https://…"}]}]',
+      },
+    },
+    ["location", "attributeMask", "attributes"]
+  ),
+  (a) =>
+    gfetch(`https://mybusinessbusinessinformation.googleapis.com/v1/${a.location}/attributes?${new URLSearchParams({ attributeMask: a.attributeMask })}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: `${a.location}/attributes`, attributes: a.attributes ?? [] }),
+    })
+);
+
+// ───────── GBP Q&A (needs mybusinessqanda.googleapis.com enabled on the GCP project) ─────────
+tool(
+  "gbp_list_questions",
+  "[GBP] Questions (with answers) on a location's public Q&A surface. 403 SERVICE_DISABLED means mybusinessqanda.googleapis.com is not enabled on the GCP project — the error carries the enable link.",
+  obj({ location: str("locations/123") }, ["location"]),
+  (a) => gfetch(`https://mybusinessqanda.googleapis.com/v1/${a.location}/questions`)
+);
+
+tool(
+  "gbp_ask_question",
+  "[GBP][WRITE] Post a question on the location's public Q&A as the merchant — the seed half of a seeded Q&A pair; pair it with gbp_answer_question. Public and client-visible: confirm with the owner before writing.",
+  obj({ location: str("locations/123"), text: str("The question text.") }, ["location", "text"]),
+  (a) => gfetch(`https://mybusinessqanda.googleapis.com/v1/${a.location}/questions`, { method: "POST", body: JSON.stringify({ text: a.text }) })
+);
+
+tool(
+  "gbp_answer_question",
+  "[GBP][WRITE] Post (or replace — it's an upsert) the merchant's answer to a question. Public and client-visible: confirm with the owner before writing.",
+  obj({ question: str("Full question name, e.g. locations/123/questions/456."), text: str("The answer text.") }, ["question", "text"]),
+  (a) => gfetch(`https://mybusinessqanda.googleapis.com/v1/${a.question}/answers:upsert`, { method: "POST", body: JSON.stringify({ answer: { text: a.text } }) })
+);
+
+// ───────── GBP Posts (legacy v4 API — same service as reviews) ─────────
+tool(
+  "gbp_list_posts",
+  "[GBP] Google Posts on a location (v4 localPosts — the same mybusiness.googleapis.com service as reviews). An empty result means no posts, not an error.",
+  obj({ location: str("Full path, e.g. accounts/123/locations/456.") }, ["location"]),
+  (a) => gfetch(`https://mybusiness.googleapis.com/v4/${a.location}/localPosts`)
+);
+
+tool(
+  "gbp_create_post",
+  "[GBP][WRITE] Publish a Google Post (v4 localPost, topicType STANDARD). summary is the visible body (≤1500 chars, ~250 shown before truncation); ctaUrl+ctaType add the button; photoUrl must be a PUBLIC https image ≥250×250 or the whole post is rejected. " +
+    "Posts expire from the profile surface after ~7 days — that is Google's design, not data loss. Public and client-visible: confirm the exact text with the owner before writing.",
+  obj(
+    {
+      location: str("Full path, e.g. accounts/123/locations/456."),
+      summary: str("The post body."),
+      ctaType: enm(["LEARN_MORE", "BOOK", "ORDER", "SHOP", "SIGN_UP", "CALL"], "Button type. Omit for no button."),
+      ctaUrl: str("Button target URL (not used for CALL)."),
+      photoUrl: str("Public https image URL, ≥250×250. Omit for text-only."),
+    },
+    ["location", "summary"]
+  ),
+  (a) => {
+    const post: Record<string, unknown> = { languageCode: "en", topicType: "STANDARD", summary: a.summary };
+    if (a.ctaType) post.callToAction = { actionType: a.ctaType, ...(a.ctaType === "CALL" ? {} : { url: a.ctaUrl }) };
+    if (a.photoUrl) post.media = [{ mediaFormat: "PHOTO", sourceUrl: a.photoUrl }];
+    return gfetch(`https://mybusiness.googleapis.com/v4/${a.location}/localPosts`, { method: "POST", body: JSON.stringify(post) });
+  }
+);
+
+tool(
+  "gbp_delete_post",
+  "[GBP][WRITE] Delete a Google Post — the undo for gbp_create_post.",
+  obj({ post: str("Full post name from gbp_list_posts, e.g. accounts/123/locations/456/localPosts/789.") }, ["post"]),
+  (a) => gfetch(`https://mybusiness.googleapis.com/v4/${a.post}`, { method: "DELETE" })
+);
+
+tool(
   "gbp_performance",
   "[GBP] Daily performance time series for a location: impressions (maps/search × desktop/mobile), call clicks, website clicks, direction requests, conversations, bookings.",
   obj(
