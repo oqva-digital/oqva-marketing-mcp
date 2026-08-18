@@ -111,6 +111,7 @@ function reloadConfig(): void {
 
 const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/webmasters", // GSC: read + manage sitemaps/sites
+  "https://www.googleapis.com/auth/siteverification", // prove ownership of new GSC properties (getToken + insert)
   "https://www.googleapis.com/auth/analytics.readonly", // GA4 Data API (reports)
   "https://www.googleapis.com/auth/analytics.edit", // GA4 Admin API (manage config)
   "https://www.googleapis.com/auth/business.manage", // Google Business Profile (read + write)
