@@ -48,7 +48,9 @@ function loadEnv(path: string): void {
     ) {
       val = val.slice(1, -1);
     }
-    if (process.env[key] === undefined) process.env[key] = val;
+    // "" counts as unset: MCP launcher configs ship empty-string placeholders,
+    // which must not shadow real values from the .env files loaded after them.
+    if (process.env[key] === undefined || process.env[key] === "") process.env[key] = val;
   }
 }
 function selfFile(): string {
