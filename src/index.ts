@@ -248,6 +248,9 @@ const obj = (properties: Record<string, unknown>, required: string[] = []) => ({
 const str = (description?: string) => (description ? { type: "string", description } : { type: "string" });
 const enm = (values: string[], description?: string) => ({ type: "string", enum: values, ...(description ? { description } : {}) });
 const arr = (items: unknown, description?: string) => ({ type: "array", items, ...(description ? { description } : {}) });
+// Shared parameter descriptions: each tool's schema is read on its own, so the default travels with it.
+const SITE_URL = str("Search Console property: URL-prefix form with its trailing slash, or sc-domain:<domain>. Defaults to GSC_SITE_URL.");
+const GA4_PROPERTY = str("Numeric GA4 property id (the property id, distinct from the G- measurement id). Defaults to GA4_PROPERTY_ID.");
 
 // ───────── status ─────────
 tool("config_status", "Report which marketing data sources are configured (no secrets revealed). Call first if a tool says 'not configured'.", obj({}), async () => ({
@@ -271,10 +274,10 @@ tool(
       dimensions: arr(enm(["query", "page", "country", "device", "date", "searchAppearance"]), "Group by these; omit for site totals."),
       siteUrl: str("Defaults to GSC_SITE_URL. URL-prefix (trailing slash) or sc-domain: form."),
       rowLimit: { type: "integer", description: "Default 1000 (max 25000)." },
-      searchType: enm(["web", "image", "video", "news", "discover", "googleNews"]),
+      searchType: enm(["web", "image", "video", "news", "discover", "googleNews"], "Result type to report. Default web."),
       filterDimension: enm(["query", "page", "country", "device"], "Optional single filter."),
-      filterOperator: enm(["equals", "contains", "notContains", "includingRegex", "excludingRegex"]),
-      filterExpression: str(),
+      filterOperator: enm(["equals", "contains", "notContains", "includingRegex", "excludingRegex"], "How filterExpression is matched against filterDimension. Default equals."),
+      filterExpression: str("The value filterDimension is matched against. The filter applies when filterDimension and filterExpression are both set."),
     },
     ["startDate", "endDate"]
   ),
@@ -300,7 +303,7 @@ tool(
   }
 );
 
-tool("gsc_list_sitemaps", "List submitted sitemaps + processing status for a property.", obj({ siteUrl: str() }), (a) => {
+tool("gsc_list_sitemaps", "List submitted sitemaps + processing status for a property.", obj({ siteUrl: SITE_URL }), (a) => {
   const site = a.siteUrl || GSC_SITE_URL;
   if (!site) throw new Error("No siteUrl and GSC_SITE_URL not set.");
   return gfetch(`https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site)}/sitemaps`);
@@ -309,7 +312,7 @@ tool("gsc_list_sitemaps", "List submitted sitemaps + processing status for a pro
 tool(
   "gsc_inspect_url",
   "URL Inspection — index/coverage status, last crawl, canonical, mobile usability for one URL.",
-  obj({ inspectionUrl: str("Full URL to inspect."), siteUrl: str() }, ["inspectionUrl"]),
+  obj({ inspectionUrl: str("Full URL to inspect."), siteUrl: SITE_URL }, ["inspectionUrl"]),
   (a) => {
     const site = a.siteUrl || GSC_SITE_URL;
     if (!site) throw new Error("No siteUrl and GSC_SITE_URL not set.");
@@ -327,13 +330,13 @@ tool(
   obj(
     {
       startDate: str("YYYY-MM-DD, or 'NdaysAgo' / 'today' / 'yesterday'."),
-      endDate: str(),
+      endDate: str("YYYY-MM-DD, or 'NdaysAgo' / 'today' / 'yesterday'."),
       metrics: arr(str(), "e.g. ['sessions','activeUsers','conversions','eventCount']."),
       dimensions: arr(str(), "e.g. ['date','sessionDefaultChannelGroup','deviceCategory','eventName']."),
       propertyId: str("Numeric GA4 property id; defaults to GA4_PROPERTY_ID (NOT the G-XXXX measurement id)."),
-      limit: { type: "integer" },
+      limit: { type: "integer", description: "Maximum rows returned. Defaults to the API's 10,000." },
       dimensionFilter: str("Dimension name to filter on (exact match)."),
-      dimensionFilterValue: str(),
+      dimensionFilterValue: str("The exact value dimensionFilter must equal. The filter applies when dimensionFilter and dimensionFilterValue are both set."),
     },
     ["startDate", "endDate", "metrics"]
   ),
@@ -356,7 +359,7 @@ tool(
 tool(
   "ga4_realtime",
   "GA4 realtime report (active users in the last 30 min).",
-  obj({ propertyId: str(), metrics: arr(str(), "Default ['activeUsers']."), dimensions: arr(str()) }),
+  obj({ propertyId: GA4_PROPERTY, metrics: arr(str(), "Default ['activeUsers']."), dimensions: arr(str(), "Realtime dimension names to group by; omit for totals.") }),
   (a) => {
     const pid = a.propertyId || GA4_PROPERTY_ID;
     if (!pid) throw new Error("No propertyId and GA4_PROPERTY_ID not set.");
@@ -412,8 +415,7 @@ tool(
 
 tool(
   "gbp_search_places",
-  "[GBP] Find Google Place IDs by name — the ids gbp_update_location needs for serviceArea. " +
-    "⚠️ A serviceArea entry without a valid placeId is SILENTLY DROPPED by the Business Profile API: no error, the locality just never appears. Always resolve ids here first, then read back what actually saved.",
+  "[GBP] Find Google Place IDs by place name, through the Places API (New) with GOOGLE_MAPS_API_KEY. Returns each match's id, display name and formatted address, up to maxResults. These ids are the placeId values that gbp_update_location's serviceArea entries carry.",
   obj({ query: str("Place to find, e.g. 'Kidlington, Oxfordshire, UK'."), regionCode: str("ISO 3166-1 alpha-2 bias. Default GB."), maxResults: { type: "integer", description: "Default 5." } }, ["query"]),
   async (a) => {
     if (!MAPS_API_KEY) {
@@ -446,6 +448,7 @@ tool(
   "gbp_update_location",
   "[GBP][WRITE] Update a location's public business information — categories, phoneNumbers, websiteUri, profile (description), regularHours, serviceArea, serviceItems, title, storefrontAddress. " +
     "updateMask REPLACES each masked field wholesale, so send the complete value: masking 'categories' while sending only additionalCategories WIPES the primary category. Read the current value with gbp_get_location first and merge. " +
+    "serviceArea places each need a placeId from gbp_search_places: the API accepts an entry that lacks a valid placeId, reports success, and leaves that locality off the profile, so read serviceArea back with gbp_get_location after the write. " +
     "This edits a public, client-visible profile — run with validateOnly=true first and confirm with the owner before the real write.",
   obj(
     {
@@ -593,8 +596,8 @@ tool("gbp_list_reviews", "[GBP] List reviews for a location (rating, comment, re
 
 tool(
   "gbp_reply_review",
-  "[GBP][WRITE] Post (or update) the business reply to a review.",
-  obj({ location: str("accounts/123/locations/456"), reviewId: str(), comment: str("The reply text.") }, ["location", "reviewId", "comment"]),
+  "[GBP][WRITE] Post the business's reply to a review, replacing any reply already there (one reply per review). The reply appears publicly on the profile under the review: confirm the exact text with the owner before writing, and read it back with gbp_list_reviews after.",
+  obj({ location: str("accounts/123/locations/456"), reviewId: str("The reviewId field of a review from gbp_list_reviews: the bare id that follows reviews/ in the review's name."), comment: str("The reply text, exactly as it will appear publicly.") }, ["location", "reviewId", "comment"]),
   (a) =>
     gfetch(`https://mybusiness.googleapis.com/v4/${a.location}/reviews/${a.reviewId}/reply`, { method: "PUT", body: JSON.stringify({ comment: a.comment }) })
 );
@@ -603,7 +606,7 @@ tool(
 tool(
   "meta_graph",
   "Meta Graph / Marketing API call — flexible escape hatch, READ and WRITE. method defaults GET; POST to create/update (e.g. path='<campaignId>', params={status:'PAUSED'}), DELETE to remove. Does anything the token's scopes allow.",
-  obj({ path: str("Graph path, e.g. 'me/adaccounts' or '<campaignId>'."), method: enm(["GET", "POST", "DELETE"]), params: { type: "object", additionalProperties: { type: "string" }, description: "Fields/params for reads; values for writes." } }, ["path"]),
+  obj({ path: str("Graph path, e.g. 'me/adaccounts' or '<campaignId>'."), method: enm(["GET", "POST", "DELETE"], "HTTP method. Default GET; POST creates or updates, DELETE removes."), params: { type: "object", additionalProperties: { type: "string" }, description: "Fields/params for reads; values for writes." } }, ["path"]),
   (a) => mfetch(a.path, a.params ?? {}, a.method ?? "GET")
 );
 
@@ -614,7 +617,7 @@ tool(
     {
       metric: str("Comma-separated, e.g. 'page_impressions,page_post_engagements,page_fan_adds'."),
       pageId: str("Defaults to META_PAGE_ID."),
-      period: enm(["day", "week", "days_28"]),
+      period: enm(["day", "week", "days_28"], "Aggregation period. Default day."),
       since: str("YYYY-MM-DD"),
       until: str("YYYY-MM-DD"),
     },
@@ -634,7 +637,7 @@ tool(
     adAccountId: str("act_<id>; defaults to META_AD_ACCOUNT_ID."),
     fields: str("Default 'impressions,clicks,spend,actions,cpc,ctr'."),
     datePreset: str("e.g. 'last_30d','last_7d','this_month'. Default last_30d."),
-    level: enm(["account", "campaign", "adset", "ad"]),
+    level: enm(["account", "campaign", "adset", "ad"], "Aggregation level. Default account."),
   }),
   (a) => {
     const acc = a.adAccountId || META_AD_ACCOUNT;
@@ -670,7 +673,7 @@ tool(
 tool(
   "meta_update_campaign",
   "[Meta][WRITE] Change a campaign's status — ACTIVE / PAUSED / ARCHIVED / DELETED. The tidy verb for dead campaigns (prefer ARCHIVED over DELETED — reversible).",
-  obj({ campaignId: str(), status: enm(["ACTIVE", "PAUSED", "ARCHIVED", "DELETED"]) }, ["campaignId", "status"]),
+  obj({ campaignId: str("Campaign id from meta_list_campaigns."), status: enm(["ACTIVE", "PAUSED", "ARCHIVED", "DELETED"]) }, ["campaignId", "status"]),
   (a) => mfetch(a.campaignId, { status: a.status }, "POST")
 );
 tool(
@@ -686,7 +689,7 @@ tool(
 tool(
   "meta_delete_custom_audience",
   "[Meta][WRITE] Delete a custom audience (destructive — removed, not archived).",
-  obj({ audienceId: str() }, ["audienceId"]),
+  obj({ audienceId: str("Custom audience id from meta_list_custom_audiences.") }, ["audienceId"]),
   (a) => mfetch(a.audienceId, {}, "DELETE")
 );
 tool(
@@ -721,7 +724,7 @@ tool(
   "ga4_create_key_event",
   "GA4 Admin [WRITE]: mark an event name as a Key event (conversion). e.g. eventName='generate_lead'.",
   obj(
-    { eventName: str("the GA4 event name"), propertyId: str(), countingMethod: enm(["ONCE_PER_EVENT", "ONCE_PER_SESSION"]) },
+    { eventName: str("the GA4 event name"), propertyId: GA4_PROPERTY, countingMethod: enm(["ONCE_PER_EVENT", "ONCE_PER_SESSION"], "Default ONCE_PER_EVENT.") },
     ["eventName"]
   ),
   (a) => {
@@ -736,7 +739,7 @@ tool(
 tool(
   "ga4_list_custom_dimensions",
   "GA4 Admin: list custom dimensions on a property.",
-  obj({ propertyId: str() }),
+  obj({ propertyId: GA4_PROPERTY }),
   (a) => {
     const pid = a.propertyId || GA4_PROPERTY_ID;
     if (!pid) throw new Error("No propertyId and GA4_PROPERTY_ID not set.");
@@ -747,7 +750,7 @@ tool(
   "ga4_create_custom_dimension",
   "GA4 Admin [WRITE]: register an event parameter as a custom dimension (e.g. surface a 'step' param as 'Booking Step').",
   obj(
-    { parameterName: str("the event parameter name"), displayName: str("UI display name"), scope: enm(["EVENT", "USER", "ITEM"]), propertyId: str() },
+    { parameterName: str("the event parameter name"), displayName: str("UI display name"), scope: enm(["EVENT", "USER", "ITEM"], "Default EVENT."), propertyId: GA4_PROPERTY },
     ["parameterName", "displayName"]
   ),
   (a) => {
@@ -762,7 +765,7 @@ tool(
 tool(
   "ga4_list_data_streams",
   "GA4 Admin: list data streams (web/app) on a property — incl. the measurement id.",
-  obj({ propertyId: str() }),
+  obj({ propertyId: GA4_PROPERTY }),
   (a) => {
     const pid = a.propertyId || GA4_PROPERTY_ID;
     if (!pid) throw new Error("No propertyId and GA4_PROPERTY_ID not set.");
@@ -787,7 +790,7 @@ tool(
 tool(
   "gsc_submit_sitemap",
   "GSC [WRITE]: submit / resubmit a sitemap.",
-  obj({ feedpath: str("full sitemap URL, e.g. https://example.com/sitemap.xml"), siteUrl: str() }, ["feedpath"]),
+  obj({ feedpath: str("full sitemap URL, e.g. https://example.com/sitemap.xml"), siteUrl: SITE_URL }, ["feedpath"]),
   (a) => {
     const site = a.siteUrl || GSC_SITE_URL;
     if (!site) throw new Error("No siteUrl and GSC_SITE_URL not set.");
@@ -800,7 +803,7 @@ tool(
 tool(
   "gsc_delete_sitemap",
   "GSC [WRITE]: remove a sitemap (re-submittable).",
-  obj({ feedpath: str("full sitemap URL"), siteUrl: str() }, ["feedpath"]),
+  obj({ feedpath: str("full sitemap URL"), siteUrl: SITE_URL }, ["feedpath"]),
   (a) => {
     const site = a.siteUrl || GSC_SITE_URL;
     if (!site) throw new Error("No siteUrl and GSC_SITE_URL not set.");
@@ -820,7 +823,7 @@ tool(
 tool(
   "gsc_request_indexing",
   "Indexing API [WRITE]: ask Google to (re)crawl a URL. NOTE: officially for JobPosting/BroadcastEvent pages; pinging general URLs works but is unofficial.",
-  obj({ url: str("the page URL"), type: enm(["URL_UPDATED", "URL_DELETED"]) }, ["url"]),
+  obj({ url: str("the page URL"), type: enm(["URL_UPDATED", "URL_DELETED"], "Default URL_UPDATED; URL_DELETED reports the page as removed.") }, ["url"]),
   (a) =>
     gfetch("https://indexing.googleapis.com/v3/urlNotifications:publish", {
       method: "POST",
