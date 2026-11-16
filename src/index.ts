@@ -603,11 +603,23 @@ tool(
 );
 
 // ───────── Meta / Facebook (Graph API) ─────────
+// Reads and writes are separate tools so permissions can tell them apart: reads run freely,
+// writes stay behind a confirmation.
 tool(
-  "meta_graph",
-  "Meta Graph / Marketing API call — flexible escape hatch, READ and WRITE. method defaults GET; POST to create/update (e.g. path='<campaignId>', params={status:'PAUSED'}), DELETE to remove. Does anything the token's scopes allow.",
-  obj({ path: str("Graph path, e.g. 'me/adaccounts' or '<campaignId>'."), method: enm(["GET", "POST", "DELETE"], "HTTP method. Default GET; POST creates or updates, DELETE removes."), params: { type: "object", additionalProperties: { type: "string" }, description: "Fields/params for reads; values for writes." } }, ["path"]),
-  (a) => mfetch(a.path, a.params ?? {}, a.method ?? "GET")
+  "meta_graph_read",
+  "[Meta] Read any Meta Graph / Marketing API path (GET only), e.g. '<igUserId>/insights' or 'me/adaccounts'. Cannot change anything; use meta_graph_write for that.",
+  obj({ path: str("Graph path, e.g. 'me/adaccounts' or '<igUserId>/insights'."), params: { type: "object", additionalProperties: { type: "string" }, description: "Query params, e.g. {fields:'id,name'} or {metric:'reach',period:'day'}." } }, ["path"]),
+  (a) => mfetch(a.path, a.params ?? {}, "GET")
+);
+
+tool(
+  "meta_graph_write",
+  "[Meta][WRITE] Change something through the Meta Graph / Marketing API: POST creates or updates (e.g. path='<campaignId>', params={status:'PAUSED'}), DELETE removes. Does anything the token's scopes allow; use meta_graph_read for reads.",
+  obj({ path: str("Graph path of the object to create, update or delete, e.g. '<campaignId>'."), method: enm(["POST", "DELETE"], "POST creates or updates; DELETE removes."), params: { type: "object", additionalProperties: { type: "string" }, description: "Values to write." } }, ["path", "method"]),
+  (a) => {
+    if (a.method !== "POST" && a.method !== "DELETE") throw new Error(`method must be POST or DELETE, got ${JSON.stringify(a.method)}; reads go through meta_graph_read.`);
+    return mfetch(a.path, a.params ?? {}, a.method);
+  }
 );
 
 tool(
@@ -651,7 +663,7 @@ tool(
 );
 
 // ───────── Meta — MANAGE (audit + tidy: ad accounts, campaigns, audiences, pixels, pages) ─────────
-tool("meta_list_ad_accounts", "[Meta] List ad accounts the token can access (id, name, status, spend, currency, business). NOTE: amount_spent is in the currency's MINOR unit (cents/pence) — divide by 100 for the real figure. (A SYSTEM-USER token returns [] here — use meta_graph on '<businessId>/owned_ad_accounts' instead.) Start of an ads audit.", obj({}), () =>
+tool("meta_list_ad_accounts", "[Meta] List ad accounts the token can access (id, name, status, spend, currency, business). NOTE: amount_spent is in the currency's MINOR unit (cents/pence) — divide by 100 for the real figure. (A SYSTEM-USER token returns [] here — use meta_graph_read on '<businessId>/owned_ad_accounts' instead.) Start of an ads audit.", obj({}), () =>
   mfetch("me/adaccounts", { fields: "id,name,account_status,amount_spent,currency,business", limit: 200 })
 );
 tool("meta_list_businesses", "[Meta] List Business Manager businesses the token can access.", obj({}), () =>

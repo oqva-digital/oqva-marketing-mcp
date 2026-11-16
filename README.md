@@ -72,7 +72,8 @@ oqva-marketing-mcp auth      re-do the Google sign-in
 | `gbp_update_attributes` | **[write]** Set/clear profile attributes (booking link, socials, "online estimates"…). |
 | `gbp_list_posts` | Google Posts on the profile (v4 API). *(No Q&A tools: Google shut the Q&A API down on 2025-11-03.)* |
 | `gbp_create_post` / `gbp_delete_post` | **[write]** Publish / remove a Google Post (summary + CTA button + photo). |
-| `meta_graph` | **[write-capable]** Raw Meta Graph/Marketing API call — GET / POST / DELETE escape hatch. |
+| `meta_graph_read` | Raw Meta Graph/Marketing API read (GET only). |
+| `meta_graph_write` | **[write]** Raw Meta Graph/Marketing API write — POST creates or updates, DELETE removes. |
 | `meta_page_insights` | Facebook Page insights. |
 | `meta_ad_insights` | Ad-account insights (only if you run Meta ads). |
 | `meta_list_ad_accounts` · `meta_list_businesses` · `meta_list_pages` | Enumerate Meta assets (ads audit). |
